@@ -161,6 +161,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cozy-chess"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7bdd7bb0b9929ea783edc2457cdd9d5b4d9732581359d33ef71224c865208cf"
+dependencies = [
+ "cozy-chess-types",
+]
+
+[[package]]
+name = "cozy-chess-types"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f4a557c6659b8705d301732f473c9a61659c740ffda3e3485e79d1d4b7a1e12"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -210,6 +225,7 @@ version = "0.1.0"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
+ "cozy-chess",
  "cw-multi-test",
  "cw-storage-plus",
  "cw2",
