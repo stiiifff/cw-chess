@@ -1,7 +1,7 @@
 [package]
 name = "cw-chess"
 version = "0.1.0"
-authors = ["Steve Degosserie <steve.degosserie@yoot.be>"]
+authors = ["Steve Degosserie <723552+stiiifff@users.noreply.github.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -40,6 +40,7 @@ cosmwasm-std = { version = "1.5.0", features = [
     # Enable this if you only deploy to chains that have CosmWasm 1.4 or higher
     # "cosmwasm_1_4",
 ] }
+cozy-chess = { version = "0.3", default-features = false }
 cw-storage-plus = "1.1.0"
 cw2 = "1.1.1"
 schemars = "0.8.15"
