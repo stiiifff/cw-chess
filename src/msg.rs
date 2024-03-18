@@ -1,10 +1,15 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
+use cosmwasm_std::Coin;
 
 #[cw_serde]
-pub struct InstantiateMsg {}
+pub struct InstantiateMsg {
+    pub min_bet: Coin,
+}
 
 #[cw_serde]
-pub enum ExecuteMsg {}
+pub enum ExecuteMsg {
+    CreateMatch { opponent: String },
+}
 
 #[cw_serde]
 #[derive(QueryResponses)]

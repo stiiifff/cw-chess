@@ -8,6 +8,23 @@ pub enum ContractError {
 
     #[error("Unauthorized")]
     Unauthorized {},
-    // Add any other custom errors you like here.
-    // Look at https://docs.rs/thiserror/1.0.21/thiserror/ for details.
+
+    #[error("Invalid address")]
+    InvalidAddress {},
+
+    #[error("Invalid bet")]
+    InvalidBet { reason: InvalidBetReason },
+
+    #[error("Invalid opponent")]
+    InvalidOpponent {},
+}
+
+#[derive(Error, Debug)]
+pub enum InvalidBetReason {
+    #[error("Wrong denomination")]
+    WrongDenom,
+    #[error("Amount too low")]
+    AmountTooLow,
+    #[error("Too many coins sent")]
+    TooManyCoins,
 }
