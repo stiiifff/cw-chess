@@ -270,9 +270,8 @@ mod tests {
     use super::exec::init_board;
     use super::*;
     use cosmwasm_std::{
-        testing::{
-            mock_dependencies, mock_dependencies_with_balances, mock_env, mock_info,
-        }, Addr, Coin, Uint128,
+        testing::{mock_dependencies, mock_dependencies_with_balances, mock_env, mock_info},
+        Addr, Coin, Uint128,
     };
     // use cosmwasm_std::{BalanceResponse, BankQuery, QueryRequest};
 
