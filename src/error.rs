@@ -17,6 +17,18 @@ pub enum ContractError {
 
     #[error("Invalid opponent")]
     InvalidOpponent {},
+
+    #[error("Invalid match ID")]
+    InvalidMatchId {},
+
+    #[error("Unknown match")]
+    UnknownMatch {},
+
+    #[error("Not the match creator")]
+    NotMatchCreator {},
+
+    #[error("Not awaiting opponent")]
+    NotAwaitingOpponent {},
 }
 
 #[derive(Error, Debug)]
@@ -25,6 +37,10 @@ pub enum InvalidBetReason {
     WrongDenom,
     #[error("Amount too low")]
     AmountTooLow,
+    #[error("Missing bet")]
+    MissingBet,
     #[error("Too many coins sent")]
     TooManyCoins,
+    #[error("Invalid amount")]
+    InvalidAmount,
 }

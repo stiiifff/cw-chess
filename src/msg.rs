@@ -9,6 +9,8 @@ pub struct InstantiateMsg {
 #[cw_serde]
 pub enum ExecuteMsg {
     CreateMatch { opponent: String },
+    AbortMatch { match_id: String },
+    JoinMatch { match_id: String },
 }
 
 #[cw_serde]

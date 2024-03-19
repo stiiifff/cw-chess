@@ -1,4 +1,5 @@
 use cosmwasm_std::{Addr, Coin};
+use cozy_chess::Board;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -39,4 +40,23 @@ pub struct Match {
     pub bet: Coin,
 }
 
-impl Match {}
+impl Match {
+    pub fn new(challenger: Addr, opponent: Addr, nonce: u64, bet: Coin) -> Match {
+        Self {
+            challenger,
+            opponent,
+            board: Board::default().to_string(),
+            state: MatchState::AwaitingOpponent,
+            nonce,
+            // style,
+            last_move: 0u64,
+            start: 0u64,
+            bet,
+        }
+    }
+
+    pub fn start(&mut self, block_height: u64) {
+        self.state = MatchState::OnGoing(NextMove::Whites);
+        self.start = block_height;
+    }
+}

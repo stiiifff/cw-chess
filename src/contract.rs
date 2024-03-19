@@ -1,7 +1,8 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    Addr, Binary, Deps, DepsMut, Env, Event, MessageInfo, Response, StdError, StdResult,
+    Addr, Binary, Coin, Deps, DepsMut, Env, Event, MessageInfo, Response, StdError, StdResult,
+    Uint128,
 };
 use cozy_chess::Board;
 use cw2::{ensure_from_older_version, set_contract_version};
@@ -35,7 +36,7 @@ pub fn instantiate(
 
 pub fn execute(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
@@ -43,6 +44,8 @@ pub fn execute(
 
     match msg {
         CreateMatch { opponent } => exec::create_match(deps, info, opponent),
+        AbortMatch { match_id } => exec::abort_match(deps, info, match_id),
+        JoinMatch { match_id } => exec::join_match(deps, env, info, match_id),
     }
 }
 
@@ -57,47 +60,17 @@ mod exec {
         opponent: String,
     ) -> Result<Response, ContractError> {
         let challenger = info.sender;
-        let opponent = match deps.api.addr_validate(&opponent) {
-            Ok(addr) => addr,
-            Err(_) => return Err(ContractError::InvalidAddress {}),
-        };
-
-        if challenger == opponent {
-            return Err(ContractError::InvalidOpponent {});
-        }
+        let opponent = validate_address(&deps, &opponent)?;
+        validate_players(&challenger, &opponent)?;
 
         let min_bet = MIN_BET.load(deps.storage)?;
-        let challenger_bet = &info.funds[0];
-
-        if info.funds.len() != 1 {
-            return Err(ContractError::InvalidBet {
-                reason: InvalidBetReason::TooManyCoins,
-            });
-        } else if challenger_bet.denom != min_bet.1 {
-            return Err(ContractError::InvalidBet {
-                reason: InvalidBetReason::WrongDenom,
-            });
-        } else if challenger_bet.amount.lt(&min_bet.0) {
-            return Err(ContractError::InvalidBet {
-                reason: InvalidBetReason::AmountTooLow,
-            });
-        }
+        let bet = validate_bet(&info.funds, &Coin::new(min_bet.0.into(), min_bet.1))?;
 
         let nonce = NEXT_NONCE.load(deps.storage)?;
 
-        let new_match = Match {
-            challenger: challenger.clone(),
-            opponent: opponent.clone(),
-            board: init_board(),
-            state: MatchState::AwaitingOpponent,
-            nonce,
-            // style,
-            last_move: 0u64,
-            start: 0u64,
-            bet: challenger_bet.clone(),
-        };
-
+        let new_match = Match::new(challenger.clone(), opponent.clone(), nonce, bet);
         let match_id = match_id(challenger.clone(), opponent.clone(), nonce);
+
         MATCHES.save(deps.storage, match_id, &new_match)?;
         PLAYER_MATCHES.update(deps.storage, challenger.clone(), |matches| {
             let mut matches = matches.unwrap_or_default();
@@ -119,7 +92,56 @@ mod exec {
             ))
     }
 
-    fn match_id(challenger: Addr, opponent: Addr, nonce: u64) -> MatchId {
+    pub fn abort_match(
+        deps: DepsMut,
+        info: MessageInfo,
+        match_id: String,
+    ) -> Result<Response, ContractError> {
+        let challenger = info.sender;
+        let match_id = validate_match_id(&match_id)?;
+        let chess_match = lookup_match(&deps, match_id)?;
+        validate_match_creator(&chess_match, &challenger)?;
+        validate_match_state(&chess_match, MatchState::AwaitingOpponent)?;
+
+        MATCHES.remove(deps.storage, match_id);
+        PLAYER_MATCHES.remove(deps.storage, challenger.clone());
+        MATCH_IDS.remove(deps.storage, chess_match.nonce);
+
+        Ok(Response::new()
+            .add_attribute("action", "abort_match")
+            .add_attribute("sender", challenger.clone())
+            .add_event(
+                Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
+            ))
+    }
+
+    pub fn join_match(
+        deps: DepsMut,
+        env: Env,
+        info: MessageInfo,
+        match_id: String,
+    ) -> Result<Response, ContractError> {
+        let opponent = info.sender;
+
+        let match_id = validate_match_id(&match_id)?;
+        let mut chess_match = lookup_match(&deps, match_id)?;
+        validate_opponent(&opponent, &chess_match.opponent)?;
+        let opponent_bet = validate_bet(&info.funds, &chess_match.bet)?;
+        validate_opponent_bet(&chess_match.bet.amount, &opponent_bet.amount)?;
+        validate_match_state(&chess_match, MatchState::AwaitingOpponent)?;
+
+        chess_match.start(env.block.height);
+        MATCHES.save(deps.storage, match_id, &chess_match)?;
+
+        Ok(Response::new()
+            .add_attribute("action", "join_match")
+            .add_attribute("sender", opponent.clone())
+            .add_event(
+                Event::new("match_started").add_attribute("match_id", hex::encode(match_id)),
+            ))
+    }
+
+    pub(crate) fn match_id(challenger: Addr, opponent: Addr, nonce: u64) -> MatchId {
         Sha256::digest(
             [
                 challenger.as_bytes(),
@@ -131,8 +153,102 @@ mod exec {
         .into()
     }
 
-    pub fn init_board() -> String {
+    #[allow(dead_code)]
+    pub(crate) fn init_board() -> String {
         Board::default().to_string()
+    }
+
+    pub(crate) fn lookup_match(deps: &DepsMut, match_id: [u8; 32]) -> Result<Match, ContractError> {
+        match MATCHES.load(deps.storage, match_id) {
+            Ok(m) => Ok(m),
+            Err(_) => Err(ContractError::UnknownMatch {}),
+        }
+    }
+
+    fn validate_address(deps: &DepsMut, addr: &str) -> Result<Addr, ContractError> {
+        match deps.api.addr_validate(addr) {
+            Ok(addr) => Ok(addr),
+            Err(_) => Err(ContractError::InvalidAddress {}),
+        }
+    }
+
+    fn validate_bet(funds: &[cosmwasm_std::Coin], min_bet: &Coin) -> Result<Coin, ContractError> {
+        if funds.is_empty() {
+            return Err(ContractError::InvalidBet {
+                reason: InvalidBetReason::MissingBet,
+            });
+        }
+
+        if funds.len() > 1 {
+            return Err(ContractError::InvalidBet {
+                reason: InvalidBetReason::TooManyCoins,
+            });
+        }
+
+        let bet = &funds[0];
+        if bet.denom != min_bet.denom {
+            return Err(ContractError::InvalidBet {
+                reason: InvalidBetReason::WrongDenom,
+            });
+        } else if bet.amount.lt(&min_bet.amount) {
+            return Err(ContractError::InvalidBet {
+                reason: InvalidBetReason::AmountTooLow,
+            });
+        }
+
+        Ok(bet.clone())
+    }
+
+    fn validate_opponent(expected: &Addr, actual: &Addr) -> Result<(), ContractError> {
+        if expected != actual {
+            return Err(ContractError::InvalidOpponent {});
+        }
+
+        Ok(())
+    }
+
+    fn validate_opponent_bet(
+        initial_bet: &Uint128,
+        opponent_bet: &Uint128,
+    ) -> Result<(), ContractError> {
+        if initial_bet != opponent_bet {
+            return Err(ContractError::InvalidBet {
+                reason: InvalidBetReason::InvalidAmount,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_players(challenger: &Addr, opponent: &Addr) -> Result<(), ContractError> {
+        if challenger == opponent {
+            return Err(ContractError::InvalidOpponent {});
+        }
+
+        Ok(())
+    }
+
+    fn validate_match_id(match_id: &str) -> Result<MatchId, ContractError> {
+        let mut bytes = [0u8; 32];
+        let match_id = match hex::decode_to_slice(match_id, &mut bytes) {
+            Ok(_) => bytes,
+            Err(_) => return Err(ContractError::InvalidMatchId {}),
+        };
+        Ok(match_id)
+    }
+
+    fn validate_match_creator(chess_match: &Match, addr: &Addr) -> Result<(), ContractError> {
+        if addr != chess_match.challenger {
+            return Err(ContractError::NotMatchCreator {});
+        }
+        Ok(())
+    }
+
+    fn validate_match_state(chess_match: &Match, state: MatchState) -> Result<(), ContractError> {
+        if chess_match.state != state {
+            return Err(ContractError::NotAwaitingOpponent {});
+        }
+        Ok(())
     }
 }
 
@@ -154,9 +270,11 @@ mod tests {
     use super::exec::init_board;
     use super::*;
     use cosmwasm_std::{
-        testing::{mock_dependencies, mock_dependencies_with_balances, mock_env, mock_info},
-        Addr, Coin, Uint128,
+        testing::{
+            mock_dependencies, mock_dependencies_with_balances, mock_env, mock_info,
+        }, Addr, Coin, Uint128,
     };
+    // use cosmwasm_std::{BalanceResponse, BankQuery, QueryRequest};
 
     const NATIVE_DENOM: &str = "untrn";
 
@@ -208,33 +326,34 @@ mod tests {
         let mut deps = mock_dependencies_with_balances(&[
             (Addr::unchecked("admin").as_ref(), &[admin_balance]),
             (player_a_addr.as_ref(), &[players_balance.clone()]),
-            (player_b_addr.as_ref(), &[players_balance]),
+            (player_b_addr.as_ref(), &[players_balance.clone()]),
         ]);
 
-        let msg = InstantiateMsg {
+        let init_msg = InstantiateMsg {
             min_bet: Coin::new(10, NATIVE_DENOM),
         };
         let info = mock_info("admin", &[]);
-        let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+        let _res = instantiate(deps.as_mut(), mock_env(), info, init_msg).unwrap();
 
-        let msg = ExecuteMsg::CreateMatch {
+        let create_msg = ExecuteMsg::CreateMatch {
             opponent: player_b_addr.to_string(),
         };
         let info = mock_info(player_a_addr.as_ref(), &[bet.clone()]);
 
         // we can just call .unwrap() to assert this was a success
-        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+        let res = execute(deps.as_mut(), mock_env(), info, create_msg).unwrap();
         assert_eq!(0, res.messages.len());
 
-        let match_id = Sha256::digest(
-            &[
-                player_a_addr.as_bytes(),
-                player_b_addr.as_bytes(),
-                &0u64.to_be_bytes(),
-            ]
-            .concat(),
-        )
-        .into();
+        // let match_id = Sha256::digest(
+        //     &[
+        //         player_a_addr.as_bytes(),
+        //         player_b_addr.as_bytes(),
+        //         &0u64.to_be_bytes(),
+        //     ]
+        //     .concat(),
+        // )
+        // .into();
+        let match_id = exec::match_id(player_a_addr.clone(), player_b_addr.clone(), 0u64);
 
         let actual = MATCHES.load(deps.as_ref().storage, match_id).unwrap();
         let expected = Match {
@@ -261,17 +380,9 @@ mod tests {
         let nonce = NEXT_NONCE.load(deps.as_ref().storage).unwrap();
         assert_eq!(1, nonce);
 
-        // let player_a_balance = deps
-        //     .querier.
-        //     .query_balance(player_a_addr.clone(), NATIVE_DENOM)
-        //     .unwrap();
-        // assert_eq!(player_a_balance, players_balance);
-
-        // let contract_balance = deps
-        //     .querier
-        //     .query_balance(Addr::unchecked("contract"), NATIVE_DENOM)
-        //     .unwrap();
-        // assert_eq!(contract_balance, Coin::new(10, NATIVE_DENOM));
+        // Note: that doesn't seem to work .. the player's balance is not updated (maybe use cw_multi_test?)
+        // let player_a_balance = query_balance_native(&deps.querier, &player_a_addr);
+        // assert_eq!(players_balance.amount - bet.amount, player_a_balance.amount);
 
         let expected = Response::new()
             .add_attribute("action", "create_match")
@@ -284,4 +395,81 @@ mod tests {
             );
         assert_eq!(expected, res);
     }
+
+    #[test]
+    fn abort_match_succeeds() {
+        let player_a_addr = Addr::unchecked("neutron1m9l358xunhhwds0568za49mzhvuxx9ux8xafx2");
+        let player_b_addr = Addr::unchecked("neutron10h9stc5v6ntgeygf5xf945njqq5h32r54rf7kf");
+        let admin_balance = Coin {
+            denom: NATIVE_DENOM.to_string(),
+            amount: Uint128::new(1000),
+        };
+        let players_balance = Coin {
+            denom: NATIVE_DENOM.to_string(),
+            amount: Uint128::new(100),
+        };
+        let bet = Coin {
+            denom: NATIVE_DENOM.to_string(),
+            amount: Uint128::new(10),
+        };
+
+        let mut deps = mock_dependencies_with_balances(&[
+            (Addr::unchecked("admin").as_ref(), &[admin_balance]),
+            (player_a_addr.as_ref(), &[players_balance.clone()]),
+            (player_b_addr.as_ref(), &[players_balance.clone()]),
+        ]);
+
+        let init_msg = InstantiateMsg {
+            min_bet: Coin::new(10, NATIVE_DENOM),
+        };
+        let info = mock_info("admin", &[]);
+        let _res = instantiate(deps.as_mut(), mock_env(), info, init_msg).unwrap();
+
+        let create_msg = ExecuteMsg::CreateMatch {
+            opponent: player_b_addr.to_string(),
+        };
+        let info = mock_info(player_a_addr.as_ref(), &[bet.clone()]);
+
+        // we can just call .unwrap() to assert this was a success
+        let res = execute(deps.as_mut(), mock_env(), info, create_msg).unwrap();
+        assert_eq!(0, res.messages.len());
+
+        let match_id = exec::match_id(player_a_addr.clone(), player_b_addr.clone(), 0u64);
+
+        let abort_msg = ExecuteMsg::AbortMatch {
+            match_id: hex::encode(match_id),
+        };
+        let info = mock_info(player_a_addr.as_ref(), &[]);
+        let res = execute(deps.as_mut(), mock_env(), info, abort_msg).unwrap();
+        assert_eq!(0, res.messages.len());
+
+        assert_eq!(Ok(None), MATCHES.may_load(deps.as_ref().storage, match_id));
+        assert_eq!(
+            Ok(None),
+            PLAYER_MATCHES.may_load(deps.as_ref().storage, player_a_addr.clone())
+        );
+        assert_eq!(Ok(None), MATCH_IDS.may_load(deps.as_ref().storage, 0u64));
+
+        let expected = Response::new()
+            .add_attribute("action", "abort_match")
+            .add_attribute("sender", player_a_addr.clone())
+            .add_event(
+                Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
+            );
+        assert_eq!(expected, res);
+    }
+
+    // fn query_balance_native(querier: &MockQuerier, address: &Addr) -> Coin {
+    //     let req: QueryRequest<BankQuery> = QueryRequest::Bank(BankQuery::Balance {
+    //         address: address.to_string(),
+    //         denom: NATIVE_DENOM.to_string(),
+    //     });
+    //     let res = querier
+    //         .raw_query(&to_json_binary(&req).unwrap())
+    //         .unwrap()
+    //         .unwrap();
+    //     let balance: BalanceResponse = from_json(&res).unwrap();
+
+    //     return balance.amount;
+    // }
 }
