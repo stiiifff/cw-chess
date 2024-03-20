@@ -1,7 +1,7 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult};
-use cw2::set_contract_version;
+use cw2::{ensure_from_older_version, set_contract_version};
 
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
@@ -44,8 +44,8 @@ pub fn query(_deps: Deps, _env: Env, _msg: QueryMsg) -> StdResult<Binary> {
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
-    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-
+    let _original_version =
+        ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     Ok(Response::default())
 }
 
