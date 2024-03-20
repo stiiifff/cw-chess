@@ -1,4 +1,4 @@
-name: release wasm
+name: Release Contracts
 
 on:
   release:

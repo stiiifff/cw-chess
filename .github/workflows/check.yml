@@ -1,18 +1,13 @@
-# Based on https://github.com/actions-rs/example/blob/master/.github/workflows/quickstart.yml
+name: Check Build and Tests
 
 on:
-  # Triggers the workflow on push or pull request events but only for the master branch
   push:
     branches: [ main ]
   pull_request:
 
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-name: Check Build and Tests
-
 jobs:
-
   check:
     runs-on: ubuntu-latest
     steps:
