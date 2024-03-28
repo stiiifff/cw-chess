@@ -3,6 +3,8 @@ use cozy_chess::Board;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub const MOVE_FEN_LENGTH: usize = 4;
+
 // Not yet implemented
 // #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 // pub enum MatchStyle {

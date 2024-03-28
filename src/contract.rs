@@ -1,17 +1,20 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    Addr, Binary, Coin, Deps, DepsMut, Env, Event, MessageInfo, Response, StdError, StdResult,
-    Uint128,
+    ensure, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, Event, MessageInfo,
+    Response, StdResult, SubMsg, Uint128,
 };
-use cozy_chess::Board;
+use cozy_chess::{Board, Color, GameStatus, Move};
 use cw2::{ensure_from_older_version, set_contract_version};
 use sha2::{Digest, Sha256};
+use std::str::FromStr;
 
 use crate::error::{ContractError, InvalidBetReason};
-use crate::game::{Match, MatchState};
+use crate::game::{Match, MatchState, NextMove, MOVE_FEN_LENGTH};
 use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
-use crate::state::{increment_nonce, MatchId, ADMIN, MATCHES, MIN_BET, NEXT_NONCE, PLAYER_MATCHES};
+use crate::state::{
+    increment_nonce, MatchId, ADMIN, MATCHES, MATCH_IDS, MIN_BET, NEXT_NONCE, PLAYER_MATCHES,
+};
 
 // Version info for migration info
 const CONTRACT_NAME: &str = "crates.io:cw-chess";
@@ -46,12 +49,11 @@ pub fn execute(
         CreateMatch { opponent } => exec::create_match(deps, info, opponent),
         AbortMatch { match_id } => exec::abort_match(deps, info, match_id),
         JoinMatch { match_id } => exec::join_match(deps, env, info, match_id),
+        MakeMove { match_id, move_fen } => exec::make_move(deps, env, info, match_id, move_fen),
     }
 }
 
 mod exec {
-    use crate::state::MATCH_IDS;
-
     use super::*;
 
     pub fn create_match(
@@ -72,11 +74,8 @@ mod exec {
         let match_id = match_id(challenger.clone(), opponent.clone(), nonce);
 
         MATCHES.save(deps.storage, match_id, &new_match)?;
-        PLAYER_MATCHES.update(deps.storage, challenger.clone(), |matches| {
-            let mut matches = matches.unwrap_or_default();
-            matches.push(match_id);
-            Result::<Vec<MatchId>, StdError>::Ok(matches)
-        })?;
+        PLAYER_MATCHES.save(deps.storage, (challenger.clone(), match_id), &())?;
+        PLAYER_MATCHES.save(deps.storage, (opponent.clone(), match_id), &())?;
         MATCH_IDS.save(deps.storage, nonce, &match_id)?;
 
         increment_nonce(deps.storage)?;
@@ -101,10 +100,11 @@ mod exec {
         let match_id = validate_match_id(&match_id)?;
         let chess_match = lookup_match(&deps, match_id)?;
         validate_match_creator(&chess_match, &challenger)?;
-        validate_match_state(&chess_match, MatchState::AwaitingOpponent)?;
+        ensure_awaiting_opponent(&chess_match)?;
 
         MATCHES.remove(deps.storage, match_id);
-        PLAYER_MATCHES.remove(deps.storage, challenger.clone());
+        PLAYER_MATCHES.remove(deps.storage, (chess_match.challenger, match_id));
+        PLAYER_MATCHES.remove(deps.storage, (chess_match.opponent, match_id));
         MATCH_IDS.remove(deps.storage, chess_match.nonce);
 
         Ok(Response::new()
@@ -126,9 +126,9 @@ mod exec {
         let match_id = validate_match_id(&match_id)?;
         let mut chess_match = lookup_match(&deps, match_id)?;
         validate_opponent(&opponent, &chess_match.opponent)?;
-        let opponent_bet = validate_bet(&info.funds, &chess_match.bet)?;
-        validate_opponent_bet(&chess_match.bet.amount, &opponent_bet.amount)?;
-        validate_match_state(&chess_match, MatchState::AwaitingOpponent)?;
+        let bet = validate_bet(&info.funds, &chess_match.bet)?;
+        validate_opponent_bet(&chess_match.bet.amount, &bet.amount)?;
+        ensure_awaiting_opponent(&chess_match)?;
 
         chess_match.start(env.block.height);
         MATCHES.save(deps.storage, match_id, &chess_match)?;
@@ -139,6 +139,101 @@ mod exec {
             .add_event(
                 Event::new("match_started").add_attribute("match_id", hex::encode(match_id)),
             ))
+    }
+
+    pub fn make_move(
+        deps: DepsMut,
+        env: Env,
+        info: MessageInfo,
+        match_id: String,
+        move_fen: String,
+    ) -> Result<Response, ContractError> {
+        let player = info.sender;
+
+        ensure!(
+            move_fen.len() == MOVE_FEN_LENGTH,
+            ContractError::InvalidMoveEncoding {}
+        );
+
+        let match_id = validate_match_id(&match_id)?;
+        let mut chess_match = lookup_match(&deps, match_id)?;
+        validate_match_state(&chess_match, player.clone())?;
+
+        let mut board = decode_board(&chess_match.board)?;
+        let mov = decode_move(&move_fen)?;
+        validate_move(&board, &mov)?;
+        board.play_unchecked(mov);
+        update_match(&mut chess_match, board.clone(), env.block.height);
+
+        let mut msgs: Vec<CosmosMsg> = vec![];
+        let mut events = vec![Event::new("move_executed")
+            .add_attribute("match_id", hex::encode(match_id))
+            .add_attribute("player", player.to_string())
+            .add_attribute("move", move_fen)];
+
+        if chess_match.state == MatchState::Won {
+            // Match was won with move that was just executed
+            events.push(
+                Event::new("match_won")
+                    .add_attribute("match_id", hex::encode(match_id))
+                    .add_attribute("winner", player.to_string())
+                    .add_attribute("board", encode_board(board)),
+            );
+
+            // Winner gets both deposits
+            // TODO: contract should take a fee (e.g. 1% of the total bet),
+            // to be sent to the contract owner (most likely a DAO treasury),
+            // and send the rest to the winner.
+            msgs.push(CosmosMsg::Bank(BankMsg::Send {
+                to_address: player.to_string(),
+                amount: vec![Coin::new(
+                    chess_match.bet.amount.u128() * 2,
+                    chess_match.bet.denom,
+                )],
+            }));
+
+            // TODO: update elo rating
+
+            // Match is over, clean up storage
+            MATCHES.remove(deps.storage, match_id);
+            PLAYER_MATCHES.remove(deps.storage, (chess_match.challenger, match_id));
+            PLAYER_MATCHES.remove(deps.storage, (chess_match.opponent, match_id));
+            MATCH_IDS.remove(deps.storage, chess_match.nonce);
+        } else if chess_match.state == MatchState::Drawn {
+            // Match drawn, refund deposits to both players
+            events.push(
+                Event::new("match_drawn")
+                    .add_attribute("match_id", hex::encode(match_id))
+                    .add_attribute("board", encode_board(board.clone())),
+            );
+
+            msgs.push(CosmosMsg::Bank(BankMsg::Send {
+                to_address: chess_match.challenger.to_string(),
+                amount: vec![chess_match.bet.clone()],
+            }));
+            msgs.push(CosmosMsg::Bank(BankMsg::Send {
+                to_address: chess_match.opponent.to_string(),
+                amount: vec![chess_match.bet],
+            }));
+
+            // TODO: update elo rating
+
+            // Match is over, clean up storage
+            MATCHES.remove(deps.storage, match_id);
+            PLAYER_MATCHES.remove(deps.storage, (chess_match.challenger, match_id));
+            PLAYER_MATCHES.remove(deps.storage, (chess_match.opponent, match_id));
+            MATCH_IDS.remove(deps.storage, chess_match.nonce);
+        } else {
+            // match still ongoing, update on-chain board
+            MATCHES.save(deps.storage, match_id, &chess_match)?;
+        }
+
+        let submsgs: Vec<SubMsg<_>> = msgs.into_iter().map(SubMsg::new).collect();
+        Ok(Response::new()
+            .add_attribute("action", "make_move")
+            .add_attribute("sender", player.clone())
+            .add_events(events)
+            .add_submessages(submsgs))
     }
 
     pub(crate) fn match_id(challenger: Addr, opponent: Addr, nonce: u64) -> MatchId {
@@ -158,11 +253,49 @@ mod exec {
         Board::default().to_string()
     }
 
+    pub(crate) fn encode_board(board: Board) -> String {
+        board.to_string()
+    }
+
+    pub(crate) fn decode_board(board: &str) -> Result<Board, ContractError> {
+        match Board::from_str(board) {
+            Ok(b) => Ok(b),
+            Err(_) => Err(ContractError::InvalidBoardEncoding {}),
+        }
+    }
+
+    pub(crate) fn decode_move(move_fen: &str) -> Result<Move, ContractError> {
+        match Move::from_str(move_fen) {
+            Ok(m) => Ok(m),
+            Err(_) => Err(ContractError::InvalidMoveEncoding {}),
+        }
+    }
+
+    fn ensure_awaiting_opponent(chess_match: &Match) -> Result<(), ContractError> {
+        if chess_match.state != MatchState::AwaitingOpponent {
+            return Err(ContractError::NotAwaitingOpponent {});
+        }
+        Ok(())
+    }
+
     pub(crate) fn lookup_match(deps: &DepsMut, match_id: [u8; 32]) -> Result<Match, ContractError> {
         match MATCHES.load(deps.storage, match_id) {
             Ok(m) => Ok(m),
             Err(_) => Err(ContractError::UnknownMatch {}),
         }
+    }
+
+    fn update_match(chess_match: &mut Match, board: Board, height: u64) {
+        chess_match.state = match board.status() {
+            GameStatus::Ongoing => match board.side_to_move() {
+                Color::White => MatchState::OnGoing(NextMove::Whites),
+                Color::Black => MatchState::OnGoing(NextMove::Blacks),
+            },
+            GameStatus::Won => MatchState::Won,
+            GameStatus::Drawn => MatchState::Drawn,
+        };
+        chess_match.board = encode_board(board.clone());
+        chess_match.last_move = height;
     }
 
     fn validate_address(deps: &DepsMut, addr: &str) -> Result<Addr, ContractError> {
@@ -199,6 +332,35 @@ mod exec {
         Ok(bet.clone())
     }
 
+    fn validate_match_state(chess_match: &Match, player: Addr) -> Result<(), ContractError> {
+        match chess_match.state {
+            MatchState::AwaitingOpponent => {
+                return Err(ContractError::StillAwaitingOpponent {});
+            }
+            MatchState::Won | MatchState::Drawn => {
+                return Err(ContractError::MatchAlreadyFinished {});
+            }
+            MatchState::OnGoing(NextMove::Whites) => {
+                if player != chess_match.challenger {
+                    return Err(ContractError::NotYourTurn {});
+                }
+            }
+            MatchState::OnGoing(NextMove::Blacks) => {
+                if player != chess_match.opponent {
+                    return Err(ContractError::NotYourTurn {});
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_move(board: &Board, mov: &Move) -> Result<(), ContractError> {
+        if !board.is_legal(*mov) {
+            return Err(ContractError::InvalidMoveEncoding {});
+        }
+        Ok(())
+    }
+
     fn validate_opponent(expected: &Addr, actual: &Addr) -> Result<(), ContractError> {
         if expected != actual {
             return Err(ContractError::InvalidOpponent {});
@@ -211,7 +373,7 @@ mod exec {
         initial_bet: &Uint128,
         opponent_bet: &Uint128,
     ) -> Result<(), ContractError> {
-        if initial_bet != opponent_bet {
+        if opponent_bet != initial_bet {
             return Err(ContractError::InvalidBet {
                 reason: InvalidBetReason::InvalidAmount,
             });
@@ -240,13 +402,6 @@ mod exec {
     fn validate_match_creator(chess_match: &Match, addr: &Addr) -> Result<(), ContractError> {
         if addr != chess_match.challenger {
             return Err(ContractError::NotMatchCreator {});
-        }
-        Ok(())
-    }
-
-    fn validate_match_state(chess_match: &Match, state: MatchState) -> Result<(), ContractError> {
-        if chess_match.state != state {
-            return Err(ContractError::NotAwaitingOpponent {});
         }
         Ok(())
     }
@@ -343,15 +498,6 @@ mod tests {
         let res = execute(deps.as_mut(), mock_env(), info, create_msg).unwrap();
         assert_eq!(0, res.messages.len());
 
-        // let match_id = Sha256::digest(
-        //     &[
-        //         player_a_addr.as_bytes(),
-        //         player_b_addr.as_bytes(),
-        //         &0u64.to_be_bytes(),
-        //     ]
-        //     .concat(),
-        // )
-        // .into();
         let match_id = exec::match_id(player_a_addr.clone(), player_b_addr.clone(), 0u64);
 
         let actual = MATCHES.load(deps.as_ref().storage, match_id).unwrap();
@@ -367,10 +513,15 @@ mod tests {
         };
         assert_eq!(expected, actual);
 
-        let player_a_matches = PLAYER_MATCHES
-            .load(deps.as_ref().storage, player_a_addr.clone())
-            .unwrap();
-        assert_eq!(vec![match_id], player_a_matches);
+        assert_eq!(
+            true,
+            PLAYER_MATCHES.has(deps.as_ref().storage, (player_a_addr.clone(), match_id))
+        );
+
+        assert_eq!(
+            true,
+            PLAYER_MATCHES.has(deps.as_ref().storage, (player_b_addr.clone(), match_id))
+        );
 
         let match_idx: u64 = 0;
         let stored_id = MATCH_IDS.load(deps.as_ref().storage, match_idx).unwrap();
@@ -444,8 +595,12 @@ mod tests {
 
         assert_eq!(Ok(None), MATCHES.may_load(deps.as_ref().storage, match_id));
         assert_eq!(
-            Ok(None),
-            PLAYER_MATCHES.may_load(deps.as_ref().storage, player_a_addr.clone())
+            false,
+            PLAYER_MATCHES.has(deps.as_ref().storage, (player_a_addr.clone(), match_id))
+        );
+        assert_eq!(
+            false,
+            PLAYER_MATCHES.has(deps.as_ref().storage, (player_b_addr.clone(), match_id))
         );
         assert_eq!(Ok(None), MATCH_IDS.may_load(deps.as_ref().storage, 0u64));
 

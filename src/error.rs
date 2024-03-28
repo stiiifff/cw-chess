@@ -29,6 +29,21 @@ pub enum ContractError {
 
     #[error("Not awaiting opponent")]
     NotAwaitingOpponent {},
+
+    #[error("Invalid board encoding")]
+    InvalidBoardEncoding {},
+
+    #[error("Invalid move encoding")]
+    InvalidMoveEncoding {},
+
+    #[error("Still awaiting opponent")]
+    StillAwaitingOpponent {},
+
+    #[error("Match already finished")]
+    MatchAlreadyFinished {},
+
+    #[error("Not your turn")]
+    NotYourTurn {},
 }
 
 #[derive(Error, Debug)]

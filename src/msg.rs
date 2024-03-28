@@ -11,6 +11,7 @@ pub enum ExecuteMsg {
     CreateMatch { opponent: String },
     AbortMatch { match_id: String },
     JoinMatch { match_id: String },
+    MakeMove { match_id: String, move_fen: String },
 }
 
 #[cw_serde]

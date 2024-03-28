@@ -15,7 +15,7 @@ pub const NEXT_NONCE: Item<u64> = Item::new("next_nonce");
 
 pub const MATCHES: Map<MatchId, Match> = Map::new("matches");
 pub const MATCH_IDS: Map<u64, MatchId> = Map::new("match_ids");
-pub const PLAYER_MATCHES: Map<Addr, Vec<MatchId>> = Map::new("player_matches");
+pub const PLAYER_MATCHES: Map<(Addr, MatchId), ()> = Map::new("player_matches");
 
 pub fn increment_nonce(store: &mut dyn Storage) -> StdResult<u64> {
     let nonce: u64 = NEXT_NONCE.may_load(store)?.unwrap_or_default() + 1;
