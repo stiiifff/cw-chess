@@ -73,11 +73,10 @@ mod exec {
         let new_match = Match::new(challenger.clone(), opponent.clone(), nonce, bet);
         let match_id = match_id(challenger.clone(), opponent.clone(), nonce);
 
-        MATCHES.save(deps.storage, match_id, &new_match)?;
-        PLAYER_MATCHES.save(deps.storage, (challenger.clone(), match_id), &())?;
-        PLAYER_MATCHES.save(deps.storage, (opponent.clone(), match_id), &())?;
-        MATCH_IDS.save(deps.storage, nonce, &match_id)?;
-
+        save_match_state(deps.storage, match_id, &new_match)?;
+        save_player_match(deps.storage, challenger.clone(), match_id)?;
+        save_player_match(deps.storage, opponent.clone(), match_id)?;
+        save_match_id(deps.storage, nonce, match_id)?;
         increment_nonce(deps.storage)?;
 
         Ok(Response::new()
@@ -102,10 +101,7 @@ mod exec {
         validate_match_creator(&chess_match, &challenger)?;
         ensure_awaiting_opponent(&chess_match)?;
 
-        MATCHES.remove(deps.storage, match_id);
-        PLAYER_MATCHES.remove(deps.storage, (chess_match.challenger, match_id));
-        PLAYER_MATCHES.remove(deps.storage, (chess_match.opponent, match_id));
-        MATCH_IDS.remove(deps.storage, chess_match.nonce);
+        clean_match_state(deps.storage, match_id, &chess_match);
 
         Ok(Response::new()
             .add_attribute("action", "abort_match")
@@ -126,12 +122,13 @@ mod exec {
         let match_id = validate_match_id(&match_id)?;
         let mut chess_match = lookup_match(&deps, match_id)?;
         validate_opponent(&opponent, &chess_match.opponent)?;
+
         let bet = validate_bet(&info.funds, &chess_match.bet)?;
         validate_opponent_bet(&chess_match.bet.amount, &bet.amount)?;
         ensure_awaiting_opponent(&chess_match)?;
 
         chess_match.start(env.block.height);
-        MATCHES.save(deps.storage, match_id, &chess_match)?;
+        save_match_state(deps.storage, match_id, &chess_match)?;
 
         Ok(Response::new()
             .add_attribute("action", "join_match")
@@ -157,11 +154,12 @@ mod exec {
 
         let match_id = validate_match_id(&match_id)?;
         let mut chess_match = lookup_match(&deps, match_id)?;
-        validate_match_state(&chess_match, player.clone())?;
+        validate_match_state(&chess_match, &player)?;
 
         let mut board = decode_board(&chess_match.board)?;
         let mov = decode_move(&move_fen)?;
         validate_move(&board, &mov)?;
+
         board.play_unchecked(mov);
         update_match(&mut chess_match, board.clone(), env.block.height);
 
@@ -184,21 +182,12 @@ mod exec {
             // TODO: contract should take a fee (e.g. 1% of the total bet),
             // to be sent to the contract owner (most likely a DAO treasury),
             // and send the rest to the winner.
-            msgs.push(CosmosMsg::Bank(BankMsg::Send {
-                to_address: player.to_string(),
-                amount: vec![Coin::new(
-                    chess_match.bet.amount.u128() * 2,
-                    chess_match.bet.denom,
-                )],
-            }));
+            transfer_pot_to_winner(&mut msgs, &chess_match, &player);
 
             // TODO: update elo rating
 
             // Match is over, clean up storage
-            MATCHES.remove(deps.storage, match_id);
-            PLAYER_MATCHES.remove(deps.storage, (chess_match.challenger, match_id));
-            PLAYER_MATCHES.remove(deps.storage, (chess_match.opponent, match_id));
-            MATCH_IDS.remove(deps.storage, chess_match.nonce);
+            clean_match_state(deps.storage, match_id, &chess_match);
         } else if chess_match.state == MatchState::Drawn {
             // Match drawn, refund deposits to both players
             events.push(
@@ -207,25 +196,15 @@ mod exec {
                     .add_attribute("board", encode_board(board.clone())),
             );
 
-            msgs.push(CosmosMsg::Bank(BankMsg::Send {
-                to_address: chess_match.challenger.to_string(),
-                amount: vec![chess_match.bet.clone()],
-            }));
-            msgs.push(CosmosMsg::Bank(BankMsg::Send {
-                to_address: chess_match.opponent.to_string(),
-                amount: vec![chess_match.bet],
-            }));
+            refund_players(&mut msgs, &chess_match);
 
             // TODO: update elo rating
 
             // Match is over, clean up storage
-            MATCHES.remove(deps.storage, match_id);
-            PLAYER_MATCHES.remove(deps.storage, (chess_match.challenger, match_id));
-            PLAYER_MATCHES.remove(deps.storage, (chess_match.opponent, match_id));
-            MATCH_IDS.remove(deps.storage, chess_match.nonce);
+            clean_match_state(deps.storage, match_id, &chess_match);
         } else {
             // match still ongoing, update on-chain board
-            MATCHES.save(deps.storage, match_id, &chess_match)?;
+            save_match_state(deps.storage, match_id, &chess_match)?;
         }
 
         let submsgs: Vec<SubMsg<_>> = msgs.into_iter().map(SubMsg::new).collect();
@@ -234,6 +213,37 @@ mod exec {
             .add_attribute("sender", player.clone())
             .add_events(events)
             .add_submessages(submsgs))
+    }
+
+    fn clean_match_state(storage: &mut dyn cosmwasm_std::Storage, match_id: [u8; 32], chess_match: &Match) {
+        MATCHES.remove(storage, match_id);
+        PLAYER_MATCHES.remove(storage, (chess_match.challenger.clone(), match_id));
+        PLAYER_MATCHES.remove(storage, (chess_match.opponent.clone(), match_id));
+        MATCH_IDS.remove(storage, chess_match.nonce);
+    }
+
+    fn save_match_id(
+        storage: &mut dyn cosmwasm_std::Storage,
+        nonce: u64,
+        match_id: [u8; 32],
+    ) -> StdResult<()> {
+        MATCH_IDS.save(storage, nonce, &match_id)
+    }
+
+    fn save_match_state(
+        storage: &mut dyn cosmwasm_std::Storage,
+        match_id: [u8; 32],
+        chess_match: &Match,
+    ) -> StdResult<()> {
+        MATCHES.save(storage, match_id, chess_match)
+    }
+
+    fn save_player_match(
+        storage: &mut dyn cosmwasm_std::Storage,
+        player: Addr,
+        match_id: [u8; 32],
+    ) -> StdResult<()> {
+        PLAYER_MATCHES.save(storage, (player, match_id), &())
     }
 
     pub(crate) fn match_id(challenger: Addr, opponent: Addr, nonce: u64) -> MatchId {
@@ -285,6 +295,17 @@ mod exec {
         }
     }
 
+    fn refund_players(msgs: &mut Vec<CosmosMsg>, chess_match: &Match) {
+        msgs.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: chess_match.challenger.to_string(),
+            amount: vec![chess_match.bet.clone()],
+        }));
+        msgs.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: chess_match.opponent.to_string(),
+            amount: vec![chess_match.bet.clone()],
+        }));
+    }
+
     fn update_match(chess_match: &mut Match, board: Board, height: u64) {
         chess_match.state = match board.status() {
             GameStatus::Ongoing => match board.side_to_move() {
@@ -294,8 +315,18 @@ mod exec {
             GameStatus::Won => MatchState::Won,
             GameStatus::Drawn => MatchState::Drawn,
         };
-        chess_match.board = encode_board(board.clone());
+        chess_match.board = encode_board(board);
         chess_match.last_move = height;
+    }
+
+    fn transfer_pot_to_winner(msgs: &mut Vec<CosmosMsg>, chess_match: &Match, winner: &Addr) {
+        msgs.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: winner.to_string(),
+            amount: vec![Coin::new(
+                chess_match.bet.amount.u128() * 2,
+                chess_match.bet.denom.clone(),
+            )],
+        }));
     }
 
     fn validate_address(deps: &DepsMut, addr: &str) -> Result<Addr, ContractError> {
@@ -332,7 +363,7 @@ mod exec {
         Ok(bet.clone())
     }
 
-    fn validate_match_state(chess_match: &Match, player: Addr) -> Result<(), ContractError> {
+    fn validate_match_state(chess_match: &Match, player: &Addr) -> Result<(), ContractError> {
         match chess_match.state {
             MatchState::AwaitingOpponent => {
                 return Err(ContractError::StillAwaitingOpponent {});
