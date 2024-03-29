@@ -102,12 +102,15 @@ pub(crate) mod exec {
 
         clean_match_state(deps.storage, match_id, &chess_match);
 
+        let mut msgs: Vec<CosmosMsg> = vec![];
+        refund_challenger(&mut msgs, &chess_match);
+
+        let submsgs: Vec<SubMsg<_>> = msgs.into_iter().map(SubMsg::new).collect();
         Ok(Response::new()
             .add_attribute("action", "abort_match")
             .add_attribute("sender", &challenger)
-            .add_event(
-                Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)),
-            ))
+            .add_event(Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)))
+            .add_submessages(submsgs))
     }
 
     pub fn join_match(
@@ -286,6 +289,13 @@ pub(crate) mod exec {
             Ok(m) => Ok(m),
             Err(_) => Err(ContractError::UnknownMatch {}),
         }
+    }
+
+    fn refund_challenger(msgs: &mut Vec<CosmosMsg>, chess_match: &Match) {
+        msgs.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: chess_match.challenger.to_string(),
+            amount: vec![chess_match.bet.clone()],
+        }));
     }
 
     fn refund_players(msgs: &mut Vec<CosmosMsg>, chess_match: &Match) {

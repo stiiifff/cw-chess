@@ -214,7 +214,7 @@ fn abort_match_succeeds() {
         match_id: hex::encode(match_id),
     };
     let res = execute(ctx.deps.as_mut(), ctx.env, player_a_info, abort_msg).unwrap();
-    assert_eq!(0, res.messages.len());
+    assert_eq!(1, res.messages.len());
 
     assert_eq!(
         Ok(None),
@@ -238,7 +238,11 @@ fn abort_match_succeeds() {
         .add_attribute("sender", &ctx.player_a_addr)
         .add_event(
             Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
-        );
+        )
+        .add_message(CosmosMsg::Bank(BankMsg::Send {
+            to_address: ctx.player_a_addr.to_string(),
+            amount: vec![Coin::new(ctx.bet.amount.u128(), ctx.bet.denom)],
+        }));
     assert_eq!(expected, res);
 }
 
