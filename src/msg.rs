@@ -1,5 +1,5 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::Coin;
+use cosmwasm_std::{Addr, Coin};
 
 #[cw_serde]
 pub struct InstantiateMsg {
@@ -8,7 +8,7 @@ pub struct InstantiateMsg {
 
 #[cw_serde]
 pub enum ExecuteMsg {
-    CreateMatch { opponent: String },
+    CreateMatch { opponent: Addr },
     AbortMatch { match_id: String },
     JoinMatch { match_id: String },
     MakeMove { match_id: String, move_fen: String },

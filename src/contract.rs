@@ -1,8 +1,8 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    ensure, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, Event, MessageInfo,
-    Response, StdResult, SubMsg, Uint128,
+    Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, Event, MessageInfo, Response,
+    StdResult, SubMsg, Uint128,
 };
 use cozy_chess::{Board, Color, GameStatus, Move};
 use cw2::{ensure_from_older_version, set_contract_version};
@@ -53,16 +53,16 @@ pub fn execute(
     }
 }
 
-mod exec {
+pub(crate) mod exec {
     use super::*;
 
     pub fn create_match(
         deps: DepsMut,
         info: MessageInfo,
-        opponent: String,
+        opponent: Addr,
     ) -> Result<Response, ContractError> {
         let challenger = info.sender;
-        let opponent = validate_address(&deps, &opponent)?;
+        let opponent = validate_address(deps.api, opponent.as_str())?;
         validate_players(&challenger, &opponent)?;
 
         let min_bet = MIN_BET.load(deps.storage)?;
@@ -71,17 +71,17 @@ mod exec {
         let nonce = NEXT_NONCE.load(deps.storage)?;
 
         let new_match = Match::new(challenger.clone(), opponent.clone(), nonce, bet);
-        let match_id = match_id(challenger.clone(), opponent.clone(), nonce);
+        let match_id = match_id(&challenger, &opponent, nonce);
 
         save_match_state(deps.storage, match_id, &new_match)?;
-        save_player_match(deps.storage, challenger.clone(), match_id)?;
-        save_player_match(deps.storage, opponent.clone(), match_id)?;
+        save_player_match(deps.storage, &challenger, match_id)?;
+        save_player_match(deps.storage, &opponent, match_id)?;
         save_match_id(deps.storage, nonce, match_id)?;
         increment_nonce(deps.storage)?;
 
         Ok(Response::new()
             .add_attribute("action", "create_match")
-            .add_attribute("sender", challenger.clone())
+            .add_attribute("sender", &challenger)
             .add_event(
                 Event::new("match_created")
                     .add_attribute("challenger", challenger)
@@ -105,7 +105,7 @@ mod exec {
 
         Ok(Response::new()
             .add_attribute("action", "abort_match")
-            .add_attribute("sender", challenger.clone())
+            .add_attribute("sender", &challenger)
             .add_event(
                 Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
             ))
@@ -132,7 +132,7 @@ mod exec {
 
         Ok(Response::new()
             .add_attribute("action", "join_match")
-            .add_attribute("sender", opponent.clone())
+            .add_attribute("sender", &opponent)
             .add_event(
                 Event::new("match_started").add_attribute("match_id", hex::encode(match_id)),
             ))
@@ -146,13 +146,9 @@ mod exec {
         move_fen: String,
     ) -> Result<Response, ContractError> {
         let player = info.sender;
-
-        ensure!(
-            move_fen.len() == MOVE_FEN_LENGTH,
-            ContractError::InvalidMoveEncoding {}
-        );
-
         let match_id = validate_match_id(&match_id)?;
+        validate_fen_move(&move_fen)?;
+
         let mut chess_match = lookup_match(&deps, match_id)?;
         validate_match_state(&chess_match, &player)?;
 
@@ -161,12 +157,12 @@ mod exec {
         validate_move(&board, &mov)?;
 
         board.play_unchecked(mov);
-        update_match(&mut chess_match, board.clone(), env.block.height);
+        update_match(&mut chess_match, &board, env.block.height);
 
         let mut msgs: Vec<CosmosMsg> = vec![];
         let mut events = vec![Event::new("move_executed")
             .add_attribute("match_id", hex::encode(match_id))
-            .add_attribute("player", player.to_string())
+            .add_attribute("player", &player)
             .add_attribute("move", move_fen)];
 
         if chess_match.state == MatchState::Won {
@@ -174,8 +170,8 @@ mod exec {
             events.push(
                 Event::new("match_won")
                     .add_attribute("match_id", hex::encode(match_id))
-                    .add_attribute("winner", player.to_string())
-                    .add_attribute("board", encode_board(board)),
+                    .add_attribute("winner", &player)
+                    .add_attribute("board", encode_board(&board)),
             );
 
             // Winner gets both deposits
@@ -193,7 +189,7 @@ mod exec {
             events.push(
                 Event::new("match_drawn")
                     .add_attribute("match_id", hex::encode(match_id))
-                    .add_attribute("board", encode_board(board.clone())),
+                    .add_attribute("board", encode_board(&board)),
             );
 
             refund_players(&mut msgs, &chess_match);
@@ -210,15 +206,19 @@ mod exec {
         let submsgs: Vec<SubMsg<_>> = msgs.into_iter().map(SubMsg::new).collect();
         Ok(Response::new()
             .add_attribute("action", "make_move")
-            .add_attribute("sender", player.clone())
+            .add_attribute("sender", &player)
             .add_events(events)
             .add_submessages(submsgs))
     }
 
-    fn clean_match_state(storage: &mut dyn cosmwasm_std::Storage, match_id: [u8; 32], chess_match: &Match) {
+    fn clean_match_state(
+        storage: &mut dyn cosmwasm_std::Storage,
+        match_id: [u8; 32],
+        chess_match: &Match,
+    ) {
         MATCHES.remove(storage, match_id);
-        PLAYER_MATCHES.remove(storage, (chess_match.challenger.clone(), match_id));
-        PLAYER_MATCHES.remove(storage, (chess_match.opponent.clone(), match_id));
+        PLAYER_MATCHES.remove(storage, (&chess_match.challenger, match_id));
+        PLAYER_MATCHES.remove(storage, (&chess_match.opponent, match_id));
         MATCH_IDS.remove(storage, chess_match.nonce);
     }
 
@@ -240,13 +240,13 @@ mod exec {
 
     fn save_player_match(
         storage: &mut dyn cosmwasm_std::Storage,
-        player: Addr,
+        player: &Addr,
         match_id: [u8; 32],
     ) -> StdResult<()> {
         PLAYER_MATCHES.save(storage, (player, match_id), &())
     }
 
-    pub(crate) fn match_id(challenger: Addr, opponent: Addr, nonce: u64) -> MatchId {
+    pub(crate) fn match_id(challenger: &Addr, opponent: &Addr, nonce: u64) -> MatchId {
         Sha256::digest(
             [
                 challenger.as_bytes(),
@@ -263,7 +263,8 @@ mod exec {
         Board::default().to_string()
     }
 
-    pub(crate) fn encode_board(board: Board) -> String {
+    #[inline]
+    pub(crate) fn encode_board(board: &Board) -> String {
         board.to_string()
     }
 
@@ -306,7 +307,7 @@ mod exec {
         }));
     }
 
-    fn update_match(chess_match: &mut Match, board: Board, height: u64) {
+    fn update_match(chess_match: &mut Match, board: &Board, height: u64) {
         chess_match.state = match board.status() {
             GameStatus::Ongoing => match board.side_to_move() {
                 Color::White => MatchState::OnGoing(NextMove::Whites),
@@ -324,13 +325,13 @@ mod exec {
             to_address: winner.to_string(),
             amount: vec![Coin::new(
                 chess_match.bet.amount.u128() * 2,
-                chess_match.bet.denom.clone(),
+                &chess_match.bet.denom,
             )],
         }));
     }
 
-    fn validate_address(deps: &DepsMut, addr: &str) -> Result<Addr, ContractError> {
-        match deps.api.addr_validate(addr) {
+    fn validate_address(api: &dyn cosmwasm_std::Api, addr: &str) -> Result<Addr, ContractError> {
+        match api.addr_validate(addr) {
             Ok(addr) => Ok(addr),
             Err(_) => Err(ContractError::InvalidAddress {}),
         }
@@ -363,6 +364,13 @@ mod exec {
         Ok(bet.clone())
     }
 
+    fn validate_fen_move(move_fen: &str) -> Result<(), ContractError> {
+        if move_fen.len() != MOVE_FEN_LENGTH {
+            return Err(ContractError::InvalidMoveEncoding {});
+        }
+        Ok(())
+    }
+
     fn validate_match_state(chess_match: &Match, player: &Addr) -> Result<(), ContractError> {
         match chess_match.state {
             MatchState::AwaitingOpponent => {
@@ -387,7 +395,7 @@ mod exec {
 
     fn validate_move(board: &Board, mov: &Move) -> Result<(), ContractError> {
         if !board.is_legal(*mov) {
-            return Err(ContractError::InvalidMoveEncoding {});
+            return Err(ContractError::IllegalMove {});
         }
         Ok(())
     }
@@ -447,214 +455,4 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
     let _original_version =
         ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     Ok(Response::default())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::state::MATCH_IDS;
-
-    use super::exec::init_board;
-    use super::*;
-    use cosmwasm_std::{
-        testing::{mock_dependencies, mock_dependencies_with_balances, mock_env, mock_info},
-        Addr, Coin, Uint128,
-    };
-    // use cosmwasm_std::{BalanceResponse, BankQuery, QueryRequest};
-
-    const NATIVE_DENOM: &str = "untrn";
-
-    #[test]
-    fn instantiate_succeeds() {
-        let mut deps = mock_dependencies();
-
-        let msg = InstantiateMsg {
-            min_bet: Coin::new(10, NATIVE_DENOM),
-        };
-        let info = mock_info("admin", &[]);
-
-        // we can just call .unwrap() to assert this was a success
-        let res = instantiate(deps.as_mut(), mock_env(), info.clone(), msg.clone()).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        let admin = ADMIN.load(deps.as_ref().storage).unwrap();
-        assert_eq!(info.sender, admin);
-
-        let min_bet = MIN_BET.load(deps.as_ref().storage).unwrap();
-        assert_eq!((msg.min_bet.amount, msg.min_bet.denom), min_bet);
-
-        let nonce = NEXT_NONCE.load(deps.as_ref().storage).unwrap();
-        assert_eq!(0, nonce);
-
-        let expected = Response::new()
-            .add_attribute("action", "instantiate")
-            .add_attribute("owner", info.sender);
-        assert_eq!(expected, res);
-    }
-
-    #[test]
-    fn create_match_succeeds() {
-        let player_a_addr = Addr::unchecked("neutron1m9l358xunhhwds0568za49mzhvuxx9ux8xafx2");
-        let player_b_addr = Addr::unchecked("neutron10h9stc5v6ntgeygf5xf945njqq5h32r54rf7kf");
-        let admin_balance = Coin {
-            denom: NATIVE_DENOM.to_string(),
-            amount: Uint128::new(1000),
-        };
-        let players_balance = Coin {
-            denom: NATIVE_DENOM.to_string(),
-            amount: Uint128::new(100),
-        };
-        let bet = Coin {
-            denom: NATIVE_DENOM.to_string(),
-            amount: Uint128::new(10),
-        };
-
-        let mut deps = mock_dependencies_with_balances(&[
-            (Addr::unchecked("admin").as_ref(), &[admin_balance]),
-            (player_a_addr.as_ref(), &[players_balance.clone()]),
-            (player_b_addr.as_ref(), &[players_balance.clone()]),
-        ]);
-
-        let init_msg = InstantiateMsg {
-            min_bet: Coin::new(10, NATIVE_DENOM),
-        };
-        let info = mock_info("admin", &[]);
-        let _res = instantiate(deps.as_mut(), mock_env(), info, init_msg).unwrap();
-
-        let create_msg = ExecuteMsg::CreateMatch {
-            opponent: player_b_addr.to_string(),
-        };
-        let info = mock_info(player_a_addr.as_ref(), &[bet.clone()]);
-
-        // we can just call .unwrap() to assert this was a success
-        let res = execute(deps.as_mut(), mock_env(), info, create_msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        let match_id = exec::match_id(player_a_addr.clone(), player_b_addr.clone(), 0u64);
-
-        let actual = MATCHES.load(deps.as_ref().storage, match_id).unwrap();
-        let expected = Match {
-            challenger: player_a_addr.clone(),
-            opponent: player_b_addr.clone(),
-            board: init_board(),
-            state: MatchState::AwaitingOpponent,
-            nonce: 0u64,
-            last_move: 0u64,
-            start: 0u64,
-            bet: bet.clone(),
-        };
-        assert_eq!(expected, actual);
-
-        assert_eq!(
-            true,
-            PLAYER_MATCHES.has(deps.as_ref().storage, (player_a_addr.clone(), match_id))
-        );
-
-        assert_eq!(
-            true,
-            PLAYER_MATCHES.has(deps.as_ref().storage, (player_b_addr.clone(), match_id))
-        );
-
-        let match_idx: u64 = 0;
-        let stored_id = MATCH_IDS.load(deps.as_ref().storage, match_idx).unwrap();
-        assert_eq!(match_id, stored_id);
-
-        let nonce = NEXT_NONCE.load(deps.as_ref().storage).unwrap();
-        assert_eq!(1, nonce);
-
-        // Note: that doesn't seem to work .. the player's balance is not updated (maybe use cw_multi_test?)
-        // let player_a_balance = query_balance_native(&deps.querier, &player_a_addr);
-        // assert_eq!(players_balance.amount - bet.amount, player_a_balance.amount);
-
-        let expected = Response::new()
-            .add_attribute("action", "create_match")
-            .add_attribute("sender", player_a_addr.clone())
-            .add_event(
-                Event::new("match_created")
-                    .add_attribute("challenger", player_a_addr)
-                    .add_attribute("opponent", player_b_addr)
-                    .add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
-            );
-        assert_eq!(expected, res);
-    }
-
-    #[test]
-    fn abort_match_succeeds() {
-        let player_a_addr = Addr::unchecked("neutron1m9l358xunhhwds0568za49mzhvuxx9ux8xafx2");
-        let player_b_addr = Addr::unchecked("neutron10h9stc5v6ntgeygf5xf945njqq5h32r54rf7kf");
-        let admin_balance = Coin {
-            denom: NATIVE_DENOM.to_string(),
-            amount: Uint128::new(1000),
-        };
-        let players_balance = Coin {
-            denom: NATIVE_DENOM.to_string(),
-            amount: Uint128::new(100),
-        };
-        let bet = Coin {
-            denom: NATIVE_DENOM.to_string(),
-            amount: Uint128::new(10),
-        };
-
-        let mut deps = mock_dependencies_with_balances(&[
-            (Addr::unchecked("admin").as_ref(), &[admin_balance]),
-            (player_a_addr.as_ref(), &[players_balance.clone()]),
-            (player_b_addr.as_ref(), &[players_balance.clone()]),
-        ]);
-
-        let init_msg = InstantiateMsg {
-            min_bet: Coin::new(10, NATIVE_DENOM),
-        };
-        let info = mock_info("admin", &[]);
-        let _res = instantiate(deps.as_mut(), mock_env(), info, init_msg).unwrap();
-
-        let create_msg = ExecuteMsg::CreateMatch {
-            opponent: player_b_addr.to_string(),
-        };
-        let info = mock_info(player_a_addr.as_ref(), &[bet.clone()]);
-
-        // we can just call .unwrap() to assert this was a success
-        let res = execute(deps.as_mut(), mock_env(), info, create_msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        let match_id = exec::match_id(player_a_addr.clone(), player_b_addr.clone(), 0u64);
-
-        let abort_msg = ExecuteMsg::AbortMatch {
-            match_id: hex::encode(match_id),
-        };
-        let info = mock_info(player_a_addr.as_ref(), &[]);
-        let res = execute(deps.as_mut(), mock_env(), info, abort_msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        assert_eq!(Ok(None), MATCHES.may_load(deps.as_ref().storage, match_id));
-        assert_eq!(
-            false,
-            PLAYER_MATCHES.has(deps.as_ref().storage, (player_a_addr.clone(), match_id))
-        );
-        assert_eq!(
-            false,
-            PLAYER_MATCHES.has(deps.as_ref().storage, (player_b_addr.clone(), match_id))
-        );
-        assert_eq!(Ok(None), MATCH_IDS.may_load(deps.as_ref().storage, 0u64));
-
-        let expected = Response::new()
-            .add_attribute("action", "abort_match")
-            .add_attribute("sender", player_a_addr.clone())
-            .add_event(
-                Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
-            );
-        assert_eq!(expected, res);
-    }
-
-    // fn query_balance_native(querier: &MockQuerier, address: &Addr) -> Coin {
-    //     let req: QueryRequest<BankQuery> = QueryRequest::Bank(BankQuery::Balance {
-    //         address: address.to_string(),
-    //         denom: NATIVE_DENOM.to_string(),
-    //     });
-    //     let res = querier
-    //         .raw_query(&to_json_binary(&req).unwrap())
-    //         .unwrap()
-    //         .unwrap();
-    //     let balance: BalanceResponse = from_json(&res).unwrap();
-
-    //     return balance.amount;
-    // }
 }
