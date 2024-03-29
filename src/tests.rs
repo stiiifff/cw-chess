@@ -399,6 +399,23 @@ fn make_move_succeeds() {
     let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "d4c6").unwrap();
     let res = play_move(&mut ctx, info_b_move.clone(), match_id, "f6f2").unwrap();
 
+    assert_eq!(
+        Ok(None),
+        MATCHES.may_load(ctx.deps.as_ref().storage, match_id)
+    );
+    assert_eq!(
+        false,
+        PLAYER_MATCHES.has(ctx.deps.as_ref().storage, (&ctx.player_a_addr, match_id))
+    );
+    assert_eq!(
+        false,
+        PLAYER_MATCHES.has(ctx.deps.as_ref().storage, (&ctx.player_b_addr, match_id))
+    );
+    assert_eq!(
+        Ok(None),
+        MATCH_IDS.may_load(ctx.deps.as_ref().storage, 0u64)
+    );
+
     let expected = Response::new()
         .add_attribute("action", "make_move")
         .add_attribute("sender", &ctx.player_b_addr)
@@ -420,6 +437,107 @@ fn make_move_succeeds() {
         .add_message(CosmosMsg::Bank(BankMsg::Send {
             to_address: ctx.player_b_addr.to_string(),
             amount: vec![Coin::new(ctx.bet.amount.u128() * 2, ctx.bet.denom)],
+        }));
+    assert_eq!(expected, res);
+}
+
+#[test]
+fn draw_works() {
+    let mut ctx = TestContext::new();
+
+    let admin_info = ctx.admin_info();
+    let init_msg = InstantiateMsg {
+        min_bet: Coin::new(10, NATIVE_DENOM),
+    };
+    let _res = instantiate(ctx.deps.as_mut(), ctx.env.clone(), admin_info, init_msg).unwrap();
+
+    let create_msg = ExecuteMsg::CreateMatch {
+        opponent: ctx.player_b_addr.clone(),
+    };
+
+    let player_a_info = ctx.player_a_info_with_bet();
+    let res = execute(
+        ctx.deps.as_mut(),
+        ctx.env.clone(),
+        player_a_info.clone(),
+        create_msg,
+    )
+    .unwrap();
+    assert_eq!(0, res.messages.len());
+
+    let match_id = exec::match_id(&ctx.player_a_addr, &ctx.player_b_addr, 0u64);
+
+    let abort_msg = ExecuteMsg::JoinMatch {
+        match_id: hex::encode(match_id),
+    };
+    let player_b_info = ctx.player_b_info_with_bet();
+    let res = execute(ctx.deps.as_mut(), ctx.env.clone(), player_b_info, abort_msg).unwrap();
+    assert_eq!(0, res.messages.len());
+
+    let info_a_move = ctx.player_a_no_bet();
+    let info_b_move = ctx.player_b_no_bet();
+
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "c2c4").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "h7h5").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "h2h4").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "a7a5").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "d1a4").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "a8a6").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "a4a5").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "a6h6").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "a5c7").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "f7f6").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "c7d7").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "e8f7").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "d7b7").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "d8d3").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "b7b8").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "d3h7").unwrap();
+    let _ = play_move(&mut ctx, info_a_move.clone(), match_id, "b8c8").unwrap();
+    let _ = play_move(&mut ctx, info_b_move.clone(), match_id, "f7g6").unwrap();
+    let res = play_move(&mut ctx, info_a_move.clone(), match_id, "c8e6").unwrap();
+
+    assert_eq!(
+        Ok(None),
+        MATCHES.may_load(ctx.deps.as_ref().storage, match_id)
+    );
+    assert_eq!(
+        false,
+        PLAYER_MATCHES.has(ctx.deps.as_ref().storage, (&ctx.player_a_addr, match_id))
+    );
+    assert_eq!(
+        false,
+        PLAYER_MATCHES.has(ctx.deps.as_ref().storage, (&ctx.player_b_addr, match_id))
+    );
+    assert_eq!(
+        Ok(None),
+        MATCH_IDS.may_load(ctx.deps.as_ref().storage, 0u64)
+    );
+
+    let expected = Response::new()
+        .add_attribute("action", "make_move")
+        .add_attribute("sender", &ctx.player_a_addr)
+        .add_event(
+            Event::new("move_executed")
+                .add_attribute("match_id", hex::encode(match_id))
+                .add_attribute("player", &ctx.player_a_addr)
+                .add_attribute("move", "c8e6"),
+        )
+        .add_event(
+            Event::new("match_drawn")
+                .add_attribute("match_id", hex::encode(match_id))
+                .add_attribute(
+                    "board",
+                    "5bnr/4p1pq/4Qpkr/7p/2P4P/8/PP1PPPP1/RNB1KBNR b KQ - 2 10",
+                ),
+        )
+        .add_message(CosmosMsg::Bank(BankMsg::Send {
+            to_address: ctx.player_a_addr.to_string(),
+            amount: vec![Coin::new(ctx.bet.amount.u128(), ctx.bet.denom.clone())],
+        }))
+        .add_message(CosmosMsg::Bank(BankMsg::Send {
+            to_address: ctx.player_b_addr.to_string(),
+            amount: vec![Coin::new(ctx.bet.amount.u128(), ctx.bet.denom)],
         }));
     assert_eq!(expected, res);
 }
