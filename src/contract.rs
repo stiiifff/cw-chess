@@ -1,13 +1,12 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, Event, MessageInfo, Response,
-    StdResult, SubMsg, Uint128,
+    ensure_eq, ensure_ne, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, Event,
+    MessageInfo, Response, StdResult, SubMsg, Uint128,
 };
-use cozy_chess::{Board, Color, GameStatus, Move};
+use cozy_chess::Move;
 use cw2::{ensure_from_older_version, set_contract_version};
 use sha2::{Digest, Sha256};
-use std::str::FromStr;
 
 use crate::error::{ContractError, InvalidBetReason};
 use crate::game::{Match, MatchState, NextMove, MOVE_FEN_LENGTH};
@@ -63,7 +62,7 @@ pub(crate) mod exec {
     ) -> Result<Response, ContractError> {
         let challenger = info.sender;
         let opponent = validate_address(deps.api, opponent.as_str())?;
-        validate_players(&challenger, &opponent)?;
+        validate_match_players(&challenger, &opponent)?;
 
         let min_bet = MIN_BET.load(deps.storage)?;
         let bet = validate_bet(&info.funds, &Coin::new(min_bet.0.into(), min_bet.1))?;
@@ -86,7 +85,7 @@ pub(crate) mod exec {
                 Event::new("match_created")
                     .add_attribute("challenger", challenger)
                     .add_attribute("opponent", opponent)
-                    .add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
+                    .add_attribute("match_id", hex::encode(match_id)),
             ))
     }
 
@@ -107,7 +106,7 @@ pub(crate) mod exec {
             .add_attribute("action", "abort_match")
             .add_attribute("sender", &challenger)
             .add_event(
-                Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)), // Convert match_id to hexadecimal string
+                Event::new("match_aborted").add_attribute("match_id", hex::encode(match_id)),
             ))
     }
 
@@ -121,7 +120,7 @@ pub(crate) mod exec {
 
         let match_id = validate_match_id(&match_id)?;
         let mut chess_match = lookup_match(&deps, match_id)?;
-        validate_opponent(&opponent, &chess_match.opponent)?;
+        validate_match_opponent(&opponent, &chess_match.opponent)?;
 
         let bet = validate_bet(&info.funds, &chess_match.bet)?;
         validate_opponent_bet(&chess_match.bet.amount, &bet.amount)?;
@@ -152,12 +151,10 @@ pub(crate) mod exec {
         let mut chess_match = lookup_match(&deps, match_id)?;
         validate_match_state(&chess_match, &player)?;
 
-        let mut board = decode_board(&chess_match.board)?;
         let mov = decode_move(&move_fen)?;
-        validate_move(&board, &mov)?;
-
-        board.play_unchecked(mov);
-        update_match(&mut chess_match, &board, env.block.height);
+        let chess_match = chess_match
+            .play_move(&mov, env.block.height)
+            .map_err(|_| ContractError::IllegalMove {})?;
 
         let mut msgs: Vec<CosmosMsg> = vec![];
         let mut events = vec![Event::new("move_executed")
@@ -171,36 +168,36 @@ pub(crate) mod exec {
                 Event::new("match_won")
                     .add_attribute("match_id", hex::encode(match_id))
                     .add_attribute("winner", &player)
-                    .add_attribute("board", encode_board(&board)),
+                    .add_attribute("board", chess_match.board()),
             );
 
             // Winner gets both deposits
             // TODO: contract should take a fee (e.g. 1% of the total bet),
             // to be sent to the contract owner (most likely a DAO treasury),
             // and send the rest to the winner.
-            transfer_pot_to_winner(&mut msgs, &chess_match, &player);
+            transfer_pot_to_winner(&mut msgs, chess_match, &player);
 
             // TODO: update elo rating
 
             // Match is over, clean up storage
-            clean_match_state(deps.storage, match_id, &chess_match);
+            clean_match_state(deps.storage, match_id, chess_match);
         } else if chess_match.state == MatchState::Drawn {
             // Match drawn, refund deposits to both players
             events.push(
                 Event::new("match_drawn")
                     .add_attribute("match_id", hex::encode(match_id))
-                    .add_attribute("board", encode_board(&board)),
+                    .add_attribute("board", chess_match.board()),
             );
 
-            refund_players(&mut msgs, &chess_match);
+            refund_players(&mut msgs, chess_match);
 
             // TODO: update elo rating
 
             // Match is over, clean up storage
-            clean_match_state(deps.storage, match_id, &chess_match);
+            clean_match_state(deps.storage, match_id, chess_match);
         } else {
             // match still ongoing, update on-chain board
-            save_match_state(deps.storage, match_id, &chess_match)?;
+            save_match_state(deps.storage, match_id, chess_match)?;
         }
 
         let submsgs: Vec<SubMsg<_>> = msgs.into_iter().map(SubMsg::new).collect();
@@ -258,34 +255,29 @@ pub(crate) mod exec {
         .into()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn init_board() -> String {
-        Board::default().to_string()
-    }
-
-    #[inline]
-    pub(crate) fn encode_board(board: &Board) -> String {
-        board.to_string()
-    }
-
-    pub(crate) fn decode_board(board: &str) -> Result<Board, ContractError> {
-        match Board::from_str(board) {
-            Ok(b) => Ok(b),
-            Err(_) => Err(ContractError::InvalidBoardEncoding {}),
-        }
-    }
-
     pub(crate) fn decode_move(move_fen: &str) -> Result<Move, ContractError> {
-        match Move::from_str(move_fen) {
+        match Match::decode_move(move_fen) {
             Ok(m) => Ok(m),
             Err(_) => Err(ContractError::InvalidMoveEncoding {}),
         }
     }
 
+    #[inline(always)]
     fn ensure_awaiting_opponent(chess_match: &Match) -> Result<(), ContractError> {
-        if chess_match.state != MatchState::AwaitingOpponent {
-            return Err(ContractError::NotAwaitingOpponent {});
-        }
+        ensure_match_state(
+            &MatchState::AwaitingOpponent,
+            &chess_match.state,
+            ContractError::NotAwaitingOpponent {},
+        )
+    }
+
+    #[inline(always)]
+    fn ensure_match_state(
+        expected: &MatchState,
+        actual: &MatchState,
+        error: ContractError,
+    ) -> Result<(), ContractError> {
+        ensure_eq!(actual, expected, error);
         Ok(())
     }
 
@@ -307,19 +299,6 @@ pub(crate) mod exec {
         }));
     }
 
-    fn update_match(chess_match: &mut Match, board: &Board, height: u64) {
-        chess_match.state = match board.status() {
-            GameStatus::Ongoing => match board.side_to_move() {
-                Color::White => MatchState::OnGoing(NextMove::Whites),
-                Color::Black => MatchState::OnGoing(NextMove::Blacks),
-            },
-            GameStatus::Won => MatchState::Won,
-            GameStatus::Drawn => MatchState::Drawn,
-        };
-        chess_match.board = encode_board(board);
-        chess_match.last_move = height;
-    }
-
     fn transfer_pot_to_winner(msgs: &mut Vec<CosmosMsg>, chess_match: &Match, winner: &Addr) {
         msgs.push(CosmosMsg::Bank(BankMsg::Send {
             to_address: winner.to_string(),
@@ -330,6 +309,7 @@ pub(crate) mod exec {
         }));
     }
 
+    #[inline(always)]
     fn validate_address(api: &dyn cosmwasm_std::Api, addr: &str) -> Result<Addr, ContractError> {
         match api.addr_validate(addr) {
             Ok(addr) => Ok(addr),
@@ -337,6 +317,7 @@ pub(crate) mod exec {
         }
     }
 
+    #[inline(always)]
     fn validate_bet(funds: &[cosmwasm_std::Coin], min_bet: &Coin) -> Result<Coin, ContractError> {
         if funds.is_empty() {
             return Err(ContractError::InvalidBet {
@@ -364,13 +345,17 @@ pub(crate) mod exec {
         Ok(bet.clone())
     }
 
+    #[inline(always)]
     fn validate_fen_move(move_fen: &str) -> Result<(), ContractError> {
-        if move_fen.len() != MOVE_FEN_LENGTH {
-            return Err(ContractError::InvalidMoveEncoding {});
-        }
+        ensure_eq!(
+            move_fen.len(),
+            MOVE_FEN_LENGTH,
+            ContractError::InvalidMoveEncoding {}
+        );
         Ok(())
     }
 
+    #[inline(always)]
     fn validate_match_state(chess_match: &Match, player: &Addr) -> Result<(), ContractError> {
         match chess_match.state {
             MatchState::AwaitingOpponent => {
@@ -393,42 +378,34 @@ pub(crate) mod exec {
         Ok(())
     }
 
-    fn validate_move(board: &Board, mov: &Move) -> Result<(), ContractError> {
-        if !board.is_legal(*mov) {
-            return Err(ContractError::IllegalMove {});
-        }
+    #[inline(always)]
+    fn validate_match_opponent(expected: &Addr, actual: &Addr) -> Result<(), ContractError> {
+        ensure_eq!(expected, actual, ContractError::InvalidOpponent {});
         Ok(())
     }
 
-    fn validate_opponent(expected: &Addr, actual: &Addr) -> Result<(), ContractError> {
-        if expected != actual {
-            return Err(ContractError::InvalidOpponent {});
-        }
-
-        Ok(())
-    }
-
+    #[inline(always)]
     fn validate_opponent_bet(
         initial_bet: &Uint128,
         opponent_bet: &Uint128,
     ) -> Result<(), ContractError> {
-        if opponent_bet != initial_bet {
-            return Err(ContractError::InvalidBet {
+        ensure_eq!(
+            opponent_bet,
+            initial_bet,
+            ContractError::InvalidBet {
                 reason: InvalidBetReason::InvalidAmount,
-            });
-        }
-
+            }
+        );
         Ok(())
     }
 
-    fn validate_players(challenger: &Addr, opponent: &Addr) -> Result<(), ContractError> {
-        if challenger == opponent {
-            return Err(ContractError::InvalidOpponent {});
-        }
-
+    #[inline(always)]
+    fn validate_match_players(challenger: &Addr, opponent: &Addr) -> Result<(), ContractError> {
+        ensure_ne!(&challenger, &opponent, ContractError::InvalidOpponent {});
         Ok(())
     }
 
+    #[inline(always)]
     fn validate_match_id(match_id: &str) -> Result<MatchId, ContractError> {
         let mut bytes = [0u8; 32];
         let match_id = match hex::decode_to_slice(match_id, &mut bytes) {
@@ -438,10 +415,13 @@ pub(crate) mod exec {
         Ok(match_id)
     }
 
+    #[inline(always)]
     fn validate_match_creator(chess_match: &Match, addr: &Addr) -> Result<(), ContractError> {
-        if addr != chess_match.challenger {
-            return Err(ContractError::NotMatchCreator {});
-        }
+        ensure_eq!(
+            chess_match.challenger,
+            addr,
+            ContractError::NotMatchCreator {}
+        );
         Ok(())
     }
 }

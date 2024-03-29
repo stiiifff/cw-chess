@@ -30,9 +30,6 @@ pub enum ContractError {
     #[error("Not awaiting opponent")]
     NotAwaitingOpponent {},
 
-    #[error("Invalid board encoding")]
-    InvalidBoardEncoding {},
-
     #[error("Invalid move encoding")]
     InvalidMoveEncoding {},
 

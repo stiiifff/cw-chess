@@ -1,4 +1,3 @@
-use crate::tests::exec::init_board;
 use crate::{
     contract::*,
     game::{Match, MatchState, NextMove},
@@ -139,16 +138,15 @@ fn create_match_succeeds() {
     let match_id = exec::match_id(&ctx.player_a_addr, &ctx.player_b_addr, 0u64);
 
     let actual = MATCHES.load(ctx.deps.as_ref().storage, match_id).unwrap();
-    let expected = Match {
-        challenger: ctx.player_a_addr.clone(),
-        opponent: ctx.player_b_addr.clone(),
-        board: init_board(),
-        state: MatchState::AwaitingOpponent,
-        nonce: 0u64,
-        last_move: 0u64,
-        start: 0u64,
-        bet: ctx.bet.clone(),
-    };
+    let expected = Match::new_ext(
+        ctx.player_a_addr.clone(),
+        ctx.player_b_addr.clone(),
+        MatchState::AwaitingOpponent,
+        0u64,
+        0u64,
+        0u64,
+        ctx.bet.clone(),
+    );
     assert_eq!(expected, actual);
 
     assert_eq!(
@@ -278,16 +276,15 @@ fn join_match_succeeds() {
     assert_eq!(0, res.messages.len());
 
     let actual = MATCHES.load(ctx.deps.as_ref().storage, match_id).unwrap();
-    let expected = Match {
-        challenger: ctx.player_a_addr.clone(),
-        opponent: ctx.player_b_addr.clone(),
-        board: init_board(),
-        state: MatchState::OnGoing(NextMove::Whites),
-        nonce: 0u64,
-        last_move: 0u64,
-        start: ctx.env.block.height,
-        bet: ctx.bet.clone(),
-    };
+    let expected = Match::new_ext(
+        ctx.player_a_addr.clone(),
+        ctx.player_b_addr.clone(),
+        MatchState::OnGoing(NextMove::Whites),
+        0u64,
+        0u64,
+        ctx.env.block.height,
+        ctx.bet.clone(),
+    );
     assert_eq!(expected, actual);
 
     let expected = Response::new()
@@ -337,16 +334,16 @@ fn make_move_succeeds() {
     assert_eq!(0, res.messages.len());
 
     let actual = MATCHES.load(ctx.deps.as_ref().storage, match_id).unwrap();
-    let expected = Match {
-        challenger: ctx.player_a_addr.clone(),
-        opponent: ctx.player_b_addr.clone(),
-        board: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1".to_string(),
-        state: MatchState::OnGoing(NextMove::Blacks),
-        nonce: 0u64,
-        last_move: ctx.env.block.height,
-        start: ctx.env.block.height,
-        bet: ctx.bet.clone(),
-    };
+    let expected = Match::new_ext(
+        ctx.player_a_addr.clone(),
+        ctx.player_b_addr.clone(),
+        MatchState::OnGoing(NextMove::Blacks),
+        0u64,
+        ctx.env.block.height,
+        ctx.env.block.height,
+        ctx.bet.clone(),
+    )
+    .set_board_state("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1".to_string());
     assert_eq!(expected, actual);
 
     let expected = Response::new()
