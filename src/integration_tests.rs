@@ -2,7 +2,7 @@
 mod tests {
     use crate::helpers::CwChessContract;
     use crate::msg::InstantiateMsg;
-    use cosmwasm_std::{Addr, Empty};
+    use cosmwasm_std::{Addr, Coin, Empty};
     // use cosmwasm_std::{Addr, Coin, Empty, Uint128};
     use cw_multi_test::{App, AppBuilder, Contract, ContractWrapper, Executor};
 
@@ -17,7 +17,7 @@ mod tests {
 
     // const USER: &str = "USER";
     const ADMIN: &str = "ADMIN";
-    // const NATIVE_DENOM: &str = "denom";
+    const NATIVE_DENOM: &str = "untrn";
 
     fn mock_app() -> App {
         AppBuilder::new().build(|_router, _, _storage| {
@@ -39,7 +39,9 @@ mod tests {
         let mut app = mock_app();
         let cw_chess_id = app.store_code(chess_contract());
 
-        let msg = InstantiateMsg {};
+        let msg = InstantiateMsg {
+            min_bet: Coin::new(10, NATIVE_DENOM),
+        };
         let cw_chess_contract_addr = app
             .instantiate_contract(
                 cw_chess_id,
