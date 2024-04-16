@@ -55,7 +55,7 @@ jobs:
           ./neutrond config chain-id neutron-1
           ./neutrond config node https://neutron-rpc.publicnode.com:443
           ./neutrond config keyring-backend file
-          (echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}; echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}) | ./neutrond keys import chess_admin chess_admin.key
+          (echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}; echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}; echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}) | ./neutrond keys import chess_admin chess_admin.key
 
       - name: Deploy WASM contracts to Neutron
         run: |
