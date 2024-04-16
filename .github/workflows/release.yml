@@ -55,7 +55,7 @@ jobs:
           ./neutrond config chain-id neutron-1
           ./neutrond config node https://neutron-rpc.publicnode.com:443
           ./neutrond config keyring-backend file
-          (echo "${{ secrets.CHESS_ADMIN_KEY_PASS }}"; echo "${{ secrets.CHESS_ADMIN_KEY_PASS }}"; echo "${{ secrets.CHESS_ADMIN_KEY_PASS }}") | ./neutrond keys import chess_admin chess_admin.key --keyring-backend file
+          (echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}; echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}; echo ${{ secrets.CHESS_ADMIN_KEY_PASS }}) | ./neutrond keys import chess_admin chess_admin.key
 
       - name: Deploy WASM contracts to Neutron
         run: |
@@ -63,7 +63,7 @@ jobs:
           for f in ./artifacts/*.wasm
           do
             echo "Processing $f"
-            tx_output=$(./neutrond tx wasm store $f --from ${{ vars.CHESS_ADMIN_KEY_ADDR }} --gas auto --gas-prices 0.01untrn --gas-adjustment 1.3 --output json -y)
+            tx_output=$(echo ${{ secrets.CHESS_ADMIN_KEY_PASS }} | ./neutrond tx wasm store $f --from ${{ vars.CHESS_ADMIN_KEY_ADDR }} --gas auto --gas-prices 0.01untrn --gas-adjustment 1.3 --output json -y)
             sleep 10
             tx_hash=$(jq -r '.txhash' <<< "$tx_output")
             echo "> TX hash: $tx_hash"
